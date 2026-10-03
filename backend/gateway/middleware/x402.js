@@ -49,8 +49,8 @@ export async function x402Middleware(req, res, next) {
   const endpoint = req.path ? `/api${req.path}` : req.url;
   const cleanEndpoint = endpoint.split('?')[0];
 
-  // Skip payment for docs/health/info endpoints
-  const skipPaths = ['/api/docs', '/api/redoc', '/api/openapi.json', '/api/health'];
+  // Skip payment for docs/health/info endpoints and the Gemma agent router (free routing helper)
+  const skipPaths = ['/api/docs', '/api/redoc', '/api/openapi.json', '/api/health', '/api/agent'];
   if (skipPaths.some(p => cleanEndpoint.startsWith(p))) {
     return next();
   }
