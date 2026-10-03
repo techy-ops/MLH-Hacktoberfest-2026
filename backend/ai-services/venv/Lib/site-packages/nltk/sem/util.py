@@ -13,8 +13,7 @@ syntax tree, followed by evaluation of the semantic representation in
 a first-order model.
 """
 
-import codecs
-
+from nltk.pathsec import open as _secure_open
 from nltk.sem import evaluate
 
 ##############################################################
@@ -143,12 +142,14 @@ def demo_model0():
 
 
 def read_sents(filename, encoding="utf8"):
-    with codecs.open(filename, "r", encoding) as fp:
+    # Reroute to secure sentinel for path validation
+    with _secure_open(filename, "r", encoding=encoding) as fp:
         sents = [l.rstrip() for l in fp]
 
-    # get rid of blank lines
+    # Filter out blank lines and comments
     sents = [l for l in sents if len(l) > 0]
     sents = [l for l in sents if not l[0] == "#"]
+
     return sents
 
 
@@ -270,8 +271,11 @@ def demo():
         sentsfile = options.sentences
     if options.grammar:
         gramfile = options.grammar
+
     if options.model:
-        exec("import %s as model" % options.model)
+        opts.error(
+            "--model is currently unsupported in demo(); the CLI always uses the built-in demo model"
+        )
 
     if sents is None:
         sents = read_sents(sentsfile)

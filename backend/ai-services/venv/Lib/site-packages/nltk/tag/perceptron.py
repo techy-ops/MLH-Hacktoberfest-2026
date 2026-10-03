@@ -21,6 +21,76 @@ from nltk import jsontags
 from nltk.data import FileSystemPathPointer, find, open_datafile
 from nltk.tag.api import TaggerI
 
+
+def _authorize_private_dir(directory):
+    """Register a private, user-owned trained-model directory on nltk.data.path
+    so the pathsec sandbox permits reading a saved model back from it.
+
+    The default trained-tagger location is the system temp dir, which is shared
+    and world-writable on Linux. A directory that is private to the current user
+    (not group-/world-writable) cannot be tampered with by another local user, so
+    it is safe to trust; a world-writable one is deliberately NOT authorized and
+    stays refused (CWE-377/CWE-378).
+    """
+    import nltk.data
+    from nltk import pathsec
+
+    try:
+        real = os.path.realpath(str(directory))
+    except (OSError, ValueError):
+        return
+    if not pathsec.is_private_dir(real):
+        return
+    known = [os.path.realpath(str(p)) for p in nltk.data.path if isinstance(p, str)]
+    if real not in known:
+        nltk.data.path.append(real)
+        pathsec._ALLOWED_ROOTS_CACHE = None
+        pathsec._LAST_DATA_PATHS = None
+
+
+def _open_private_model_dir(loc):
+    """Create/reuse *loc* as a private directory and return a pinned O_NOFOLLOW
+    directory descriptor, closing the shared-temp symlink squat / TOCTOU race.
+
+    The leaf is created with ``os.mkdir`` (atomic: it either creates the real
+    directory or fails with ``FileExistsError``) and then re-opened with
+    ``O_NOFOLLOW|O_DIRECTORY`` -- so a symlink pre-planted or raced in at the
+    guessable default name is refused (``ELOOP``/``ENOTDIR``) instead of being
+    followed. The descriptor is rejected unless it is a real directory owned by
+    the current user and not group-/world-writable (CWE-59/377/378).
+    """
+    import errno
+
+    parent = os.path.dirname(loc) or "."
+    os.makedirs(parent, exist_ok=True)
+    try:
+        os.mkdir(loc, 0o700)
+    except FileExistsError:
+        pass
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(loc, flags)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise PermissionError(
+                f"Refusing trained-model dir {loc!r}: not a real directory "
+                "(symlink / TOCTOU squat) (CWE-59)"
+            ) from e
+        raise
+    try:
+        st = os.fstat(fd)
+        # POSIX only: on Windows st_uid is not meaningful and NTFS ACLs govern.
+        if os.name == "posix" and (st.st_uid != os.getuid() or (st.st_mode & 0o022)):
+            raise PermissionError(
+                f"Refusing non-private trained-model dir {loc!r}: not owned by "
+                "you or group-/world-writable (CWE-377/378)"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 try:
     import numpy as np
 except ImportError:
@@ -260,17 +330,49 @@ class PerceptronTagger(TaggerI):
             self.save_to_json(lang=self.lang, loc=save_loc)
 
     def save_to_json(self, lang="xxx", loc=None):
-        from os import mkdir
-        from os.path import isdir
-
         if not loc:
             loc = self.save_dir
-        if not isdir(loc):
-            mkdir(loc)
+        # On POSIX the default TRAINED_TAGGER_PATH is a shared, world-writable
+        # temp dir (/tmp) and the save dir is a *guessable* name in it, so a
+        # local attacker can pre-plant or race a symlink at ``loc``. A plain
+        # ``islink`` pre-check is non-atomic (TOCTOU) and misses it once created;
+        # ``_open_private_model_dir`` instead creates/re-opens the leaf atomically
+        # with O_NOFOLLOW|O_DIRECTORY, verifies it is a real, user-owned,
+        # non-world-writable directory, and returns a pinned fd we write relative
+        # to (CWE-59/377/378).
+        #
+        # On Windows ``%TEMP%`` is per-user and ACL-protected (no such squat), and
+        # ``os.open`` cannot open a directory as a descriptor there, so use a
+        # plain create + write.
+        if os.name != "posix":
+            os.makedirs(loc, exist_ok=True)
+            _authorize_private_dir(loc)
+            for param, json_file in zip(self.encode_json_obj(), self.param_files(lang)):
+                with open(path_join(loc, json_file), "w") as fout:
+                    json.dump(param, fout)
+            return
 
-        for param, json_file in zip(self.encode_json_obj(), self.param_files(lang)):
-            with open(path_join(loc, json_file), "w") as fout:
-                json.dump(param, fout)
+        dir_fd = _open_private_model_dir(loc)
+        try:
+            _authorize_private_dir(loc)
+
+            # Write each model file relative to the pinned directory fd (where
+            # supported) with O_NOFOLLOW (0600), so neither the dir nor the file
+            # can be redirected outside the verified directory after the check.
+            use_dir_fd = os.open in os.supports_dir_fd
+
+            def _no_follow_opener(path, flags):
+                extra = {"dir_fd": dir_fd} if use_dir_fd else {}
+                return os.open(
+                    path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600, **extra
+                )
+
+            for param, json_file in zip(self.encode_json_obj(), self.param_files(lang)):
+                target = json_file if use_dir_fd else path_join(loc, json_file)
+                with open(target, "w", opener=_no_follow_opener) as fout:
+                    json.dump(param, fout)
+        finally:
+            os.close(dir_fd)
 
     def load_from_json(self, lang="eng", loc=None):
         # Automatically find path to the tagger if location is not specified.
@@ -289,6 +391,13 @@ class PerceptronTagger(TaggerI):
             # Explicit filesystem path
             loc = FileSystemPathPointer(str(loc))
         # else: assume loc is already a PathPointer (zip or filesystem)
+
+        # A trained model saved under the (private) system-temp trained-tagger
+        # dir lives outside nltk_data; authorize that specific private directory
+        # so it can be read back under the pathsec sandbox.
+        loc_path = getattr(loc, "path", None)
+        if loc_path and os.path.isdir(loc_path):
+            _authorize_private_dir(loc_path)
 
         def load_param(json_file):
             with open_datafile(loc, json_file) as fin:

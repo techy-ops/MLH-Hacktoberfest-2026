@@ -1,4 +1,6 @@
-from nltk.translate.ribes_score import corpus_ribes, word_rank_alignment
+import pytest
+
+from nltk.translate.ribes_score import corpus_ribes, sentence_ribes, word_rank_alignment
 
 
 def test_ribes_empty_worder():  # worder as in word order
@@ -12,6 +14,26 @@ def test_ribes_empty_worder():  # worder as in word order
     list_of_refs = [[ref]]
     hypotheses = [hyp]
     assert corpus_ribes(list_of_refs, hypotheses) == 0.0
+
+
+def test_ribes_empty_hypothesis():
+    refs = [["a"], ["b"]]
+
+    assert sentence_ribes(refs, []) == 0.0
+    assert corpus_ribes([refs], [[]]) == 0.0
+
+
+def test_ribes_empty_references():
+    assert sentence_ribes([], ["a"]) == 0.0
+
+
+def test_ribes_empty_corpus():
+    assert corpus_ribes([], []) == 0.0
+
+
+def test_ribes_rejects_mismatched_corpus_lengths():
+    with pytest.raises(ValueError, match="number of reference sets"):
+        corpus_ribes([[["a"]]], [["a"], ["b"]])
 
 
 def test_ribes_one_worder():
@@ -244,3 +266,17 @@ def test_no_zero_div():
     score = corpus_ribes(list_of_refs, hypotheses)
 
     assert round(score, 4) == 0.1688
+
+
+def test_word_rank_alignment_unhashable_tokens():
+    # Tokens need not be hashable: word_rank_alignment must still work when
+    # tokens are e.g. lists (the previous list.count implementation relied only
+    # on equality). Regression for the memoisation introduced with the KMP
+    # rewrite, which must fall back to an uncached count for unhashable tokens
+    # rather than raise TypeError.
+    ref = [["b"], ["a"], ["b"], ["a"]]
+    hyp = [["a"], ["b"], ["a"], ["b"]]
+    # Should not raise; result matches the equivalent hashable (string) tokens.
+    assert word_rank_alignment(ref, hyp) == word_rank_alignment(
+        ["b", "a", "b", "a"], ["a", "b", "a", "b"]
+    )
