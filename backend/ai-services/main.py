@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from routers import translate, summarize, sentiment, image_gen
+from routers import translate, summarize, sentiment, image_gen, agent
 from services.algorand import AlgorandService
 
 # ── Logging ─────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ app.include_router(translate.router, prefix="/api/translate", tags=["Translation
 app.include_router(summarize.router, prefix="/api/summarize", tags=["Summarization"])
 app.include_router(sentiment.router, prefix="/api/sentiment", tags=["Sentiment Analysis"])
 app.include_router(image_gen.router, prefix="/api/image", tags=["Image Generation"])
+app.include_router(agent.router, prefix="/api/agent", tags=["Agent / Gemma"])
 
 
 @app.get("/")
@@ -61,6 +62,7 @@ async def root():
             {"path": "/api/summarize", "description": "Text summarization", "price": "0.002 ALGO"},
             {"path": "/api/sentiment", "description": "Sentiment analysis", "price": "0.001 ALGO"},
             {"path": "/api/image", "description": "Image generation", "price": "0.005 ALGO"},
+            {"path": "/api/agent/select-tool", "description": "Gemma 4 tool selection (no payment required)", "price": "free"},
         ],
     }
 
